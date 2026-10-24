@@ -1,0 +1,20 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Lumen Desktop",
+  "version": "0.1.0",
+  "identifier": "com.rjnsystems.lumen",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [{ "title": "Lumen Desktop", "width": 1280, "height": 820, "minWidth": 900, "minHeight": 600 }],
+    "security": {
+      "csp": "default-src 'self'; connect-src ipc: http://ipc.localhost; img-src 'self' data: http://lumen-media.localhost lumen-media:; media-src 'self' http://lumen-media.localhost lumen-media:; style-src 'self'; script-src 'self'",
+      "devCsp": null
+    }
+  },
+  "bundle": { "active": true, "targets": "all" }
+}
