@@ -1,12 +1,12 @@
 # Plano de implementação — Lumen Desktop (MVP)
 
-Estado: plano inicial, sujeito à validação com usuários individuais e uma equipe piloto.
+Estado: escopo do piloto confirmado em 24/10/2026. As seções de arquitetura central e marcos de equipe abaixo são roteiro futuro, não critérios de aceite desta entrega local.
 
 ## 1. Objetivo
 
 Transformar uma captação com nomes repetidos (como `C001.MP4`) em um acervo pesquisável, sem exigir que o cinegrafista saiba previamente a qual local pertence cada take. O aplicativo deve detectar a mídia, preservar uma cópia local dos originais, extrair pistas, sugerir agrupamentos por matéria/local e pedir revisão humana antes de aplicar a organização.
 
-**Recorte de validação:** um usuário individual e uma equipe piloto, começando por Windows. **Recorte do produto:** SaaS que atende trabalho solo, vários editores no mesmo acervo e vários clientes com acervos separados; aplicativo para Windows, macOS e uma distribuição Linux inicial (a definir). A interface inteira fica no Lumen Desktop; a nuvem presta serviços de análise e catálogo. Não há servidor obrigatório no cliente. Ver [ARQUITETURA.md](ARQUITETURA.md).
+**Entrega vigente:** um usuário individual no Windows, interface inteira no Lumen Desktop, originais locais e IA opcional via Ollama (`qwen3-vl:4b-instruct`). Persistência local por JSON versionado e preferências/rascunhos locais; sem API, login, equipes ou dependência de nuvem. Organização principal **local → matéria**, com local não identificado como resultado válido. Mac/Linux e arquitetura SaaS multiempresa são evolução futura, sujeita a validação e armazenamento/autorização próprios.
 
 ## 2. Resultado mínimo que precisa funcionar
 
@@ -14,12 +14,12 @@ Transformar uma captação com nomes repetidos (como `C001.MP4`) em um acervo pe
 2. O Lumen inventaria vídeos/fotos e **copia** os originais para uma área de ingestão local, sem apagar nem renomear a origem. Confere tamanho e hash da cópia e mostra falhas.
 3. Para cada arquivo, registra um ID próprio (não usa `C001.MP4` como identificador), caminho, tamanho, hash, data/hora, câmera, duração e metadados disponíveis. Gera miniaturas/prévias.
 4. O usuário fornece a pauta/retranca e, opcionalmente, locais visitados. Ele não precisa associar manualmente cada arquivo a um lugar.
-5. O serviço de IA analisa as pistas autorizadas e devolve, **por arquivo**, tags, local/matéria sugeridos, confiança e evidências. Quando não houver evidência suficiente, devolve **“local não identificado”**.
+5. A IA local opcional analisa amostras autorizadas e devolve, **por arquivo**, descrição/tags e possíveis local/matéria, com evidências. Percentuais das regras são força indicativa, não confiança calibrada. Quando não houver evidência suficiente, usa **“local não identificado”**. Sem IA, revisão e ingestão continuam disponíveis.
 6. O editor pesquisa o acervo, visualiza takes e corrige as sugestões. A aprovação grava um plano de organização auditável. O MVP **não move nem renomeia os originais automaticamente**; isso exige uma etapa posterior, explícita e reversível.
 
 Critério de sucesso do piloto: uma captação real de pelo menos dois locais e uma matéria é ingerida sem colisão de nomes; o editor encontra os takes por busca e consegue revisar todos os casos incertos. Erros de IA não podem ser apresentados como fatos confirmados.
 
-## 3. Arquitetura proposta
+## 3. Evolução futura — arquitetura SaaS (fora do piloto local)
 
 | Parte | Tecnologia inicial | Responsabilidade |
 | --- | --- | --- |
@@ -38,7 +38,9 @@ Fluxo: `cartão/pasta → cópia local verificada → inventário/miniaturas →
 
 **Regra de espaços:** cada acervo pertence a um espaço de trabalho (`tenant_id` interno). Um espaço pode ter uma pessoa ou uma equipe. Nenhuma busca, sugestão, miniatura, job ou log de um espaço pode ser acessado por outro sem ação explícita e autorizada. O `tenant_id` é determinado por identidade e associação validadas no servidor, nunca aceito isoladamente do aplicativo.
 
-## 4. Incrementos de implementação
+## 4. Roteiro de evolução (marcos originais, fora do aceite individual atual)
+
+Antes de retomar M1 multiempresa, revisar identidade, autorização, sincronização, banco e privacidade. JSON local e o nome digitado de workspace não constituem isolamento multiempresa. Para o piloto atual, a ordem de trabalho é: checkpoints/retomada; inventário consistente e timeout; rascunhos e contexto; busca por data e agrupamento local/matéria; lote/reversões; layout V2; distribuição e piloto real.
 
 ### M0 — Decisões e material piloto
 

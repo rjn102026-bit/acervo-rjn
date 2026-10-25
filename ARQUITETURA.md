@@ -1,6 +1,21 @@
-# Arquitetura proposta — Lumen SaaS multiempresa
+# Arquitetura — Lumen Desktop e evolução multiempresa
 
-Estado: decisão inicial para implementação; validar custos, privacidade e desempenho no piloto.
+Estado: decisão vigente confirmada em 24/10/2026: piloto local individual no Windows.
+
+## Arquitetura em execução no piloto
+
+- React/TypeScript/Vite dentro do Tauri; Rust coordena acesso local, cópia, processamento e registros.
+- Inventário inicial e checkpoints JSON imutáveis antes/depois de cada arquivo. Retomada na mesma captação; origem original é necessária. Não há retomada por byte.
+- FFprobe/FFmpeg locais, com limites de execução e de saída. Binários ainda dependem de instalação disponível; distribuição em máquina limpa precisa de homologação.
+- Ollama opcional em loopback, modelo `qwen3-vl:4b-instruct`. A intenção da fila fica no armazenamento local da interface; resultados versionados permitem retomar por arquivo sem inferir novamente os concluídos.
+- Rascunhos por contexto/captação/take e últimas pastas no armazenamento local da interface. Não há upload implícito de mídia.
+- Revisão e exportação de cópias por **local → matéria**. Sugestões de IA permanecem identificadas como sugestões; eventos humanos e aprovação guardam autoria local, sem identidade autenticada.
+- Aprovações podem ser revogadas com um registro adicional. Restauração cria nova revisão e preserva o histórico. Exportações antigas não são apagadas nem passam a representar automaticamente uma nova aprovação.
+- Login, equipe, API central, PostgreSQL, SQLite, nuvem e isolamento multiempresa **não fazem parte do piloto vigente**. O nome do workspace serve apenas para separar pastas locais.
+
+## Evolução futura — SaaS multiempresa
+
+As seções seguintes preservam o plano de evolução. Elas não descrevem componentes já existentes nem ampliam o aceite desta entrega individual.
 
 ## Premissas
 
