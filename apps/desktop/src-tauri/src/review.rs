@@ -40,6 +40,61 @@ pub struct ReviewEvent {
     reviewed_at: String,
     #[serde(default)]
     category: String,
+    #[serde(default)]
+    author: String,
+}
+
+fn local_actor() -> String {
+    format!(
+        "local:{}",
+        std::env::var("USERNAME")
+            .or_else(|_| std::env::var("USER"))
+            .unwrap_or_else(|_| "operador".into())
+    )
+}
+
+fn record_directory(directory: &Path, name: &str) -> Result<PathBuf, String> {
+    let path = directory.join(name);
+    fs::create_dir_all(&path).map_err(|error| error.to_string())?;
+    let real = fs::canonicalize(path).map_err(|error| error.to_string())?;
+    if !real.starts_with(directory) {
+        return Err("Pasta de registros fora da captação.".into());
+    }
+    Ok(real)
+}
+
+fn validate_review_fields(
+    status: &str,
+    location: &Option<String>,
+    matter: &str,
+    tags: &[String],
+    note: &str,
+    category: &str,
+) -> Result<(), String> {
+    if !matches!(status, "confirmed" | "unidentified" | "pending") {
+        return Err("Estado de revisão inválido".into());
+    }
+    if location.as_ref().is_some_and(|value| value.len() > 120)
+        || matter.trim().len() > 120
+        || note.trim().len() > 1000
+        || category.trim().len() > 120
+    {
+        return Err("Local, matéria, categoria ou observação excede o limite permitido".into());
+    }
+    if status == "confirmed" && location.is_none() {
+        return Err("Informe um local para confirmar este take".into());
+    }
+    if status != "confirmed" && location.is_some() {
+        return Err("Use confirmação para salvar um local, ou deixe o local vazio".into());
+    }
+    if tags.len() > 20
+        || tags
+            .iter()
+            .any(|tag| tag.trim().is_empty() || tag.trim().len() > 50)
+    {
+        return Err("Informe até 20 tags, com no máximo 50 caracteres cada".into());
+    }
+    Ok(())
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -54,19 +109,49 @@ pub struct OrganizationProposal {
     reason: String,
 }
 
-fn organization_for(asset_id: &str, decision: Option<&ReviewEvent>, analysis: Option<&crate::ai::VisualAnalysis>) -> Option<OrganizationProposal> {
+fn organization_for(
+    asset_id: &str,
+    decision: Option<&ReviewEvent>,
+    analysis: Option<&crate::ai::VisualAnalysis>,
+) -> Option<OrganizationProposal> {
     if let Some(decision) = decision.filter(|event| event.status != "pending") {
-        return Some(OrganizationProposal { event_id: decision.event_id.clone(),
-            category: if !decision.category.is_empty() { decision.category.clone() } else if !decision.matter.is_empty() { decision.matter.clone() } else { "Organização revisada".into() },
-            matter: decision.matter.clone(), tags: decision.tags.clone(), location: decision.location.clone(),
-            source: "human".into(), requires_review: false, reason: "Correção ou decisão salva pelo editor.".into() });
+        return Some(OrganizationProposal {
+            event_id: decision.event_id.clone(),
+            category: if !decision.category.is_empty() {
+                decision.category.clone()
+            } else if !decision.matter.is_empty() {
+                decision.matter.clone()
+            } else {
+                "Organização revisada".into()
+            },
+            matter: decision.matter.clone(),
+            tags: decision.tags.clone(),
+            location: decision.location.clone(),
+            source: "human".into(),
+            requires_review: false,
+            reason: "Correção ou decisão salva pelo editor.".into(),
+        });
     }
     let analysis = analysis?;
     let pending = decision.is_some_and(|event| event.status == "pending");
-    Some(OrganizationProposal { event_id: format!("ai:{asset_id}:{}", analysis.analyzed_at),
-        category: analysis.category.clone(), matter: analysis.matter.clone(), tags: analysis.tags.clone(), location: analysis.location.clone(),
-        source: "ai".into(), requires_review: analysis.needs_review || pending,
-        reason: if pending { "O editor manteve este take pendente.".into() } else if analysis.needs_review { analysis.review_reason.clone() } else { "Organizado automaticamente a partir do conteúdo visual.".into() } })
+    Some(OrganizationProposal {
+        event_id: format!("ai:{asset_id}:{}", analysis.analyzed_at),
+        category: analysis.category.clone(),
+        matter: analysis.matter.clone(),
+        tags: analysis.tags.clone(),
+        location: analysis.location.clone(),
+        source: "ai".into(),
+        requires_review: analysis.needs_review || pending || analysis.location.is_none(),
+        reason: if pending {
+            "O editor manteve este take pendente.".into()
+        } else if analysis.needs_review {
+            analysis.review_reason.clone()
+        } else if analysis.location.is_none() {
+            "A IA organizou o conteúdo, mas não encontrou evidência para nomear o local. Confirme o local ou marque como não identificado.".into()
+        } else {
+            "Organizado automaticamente a partir do conteúdo visual.".into()
+        },
+    })
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -94,27 +179,71 @@ pub struct ReviewSearchEntry {
     visible_text: Vec<String>,
 }
 
-pub fn list_review_index_impl(destination: &str, workspace: &str) -> Result<Vec<ReviewSearchEntry>, String> {
+pub fn list_review_index_impl(
+    destination: &str,
+    workspace: &str,
+) -> Result<Vec<ReviewSearchEntry>, String> {
     let mut index = Vec::new();
     for manifest in list_captures_impl(destination, workspace)? {
         for item in list_review_items_impl(destination, workspace, &manifest.capture_id)? {
             let decision = item.decision.as_ref();
             index.push(ReviewSearchEntry {
-                capture_id: manifest.capture_id.clone(), asset_id: item.asset_id,
-                status: decision.filter(|event| event.status != "pending").map(|event| event.status.clone()).unwrap_or_else(|| if item.organization.as_ref().is_some_and(|value| !value.requires_review) { "organized".into() } else { "pending".into() }),
-                location: item.organization.as_ref().and_then(|value| value.location.clone()),
-                matter: item.organization.as_ref().map(|value| value.matter.clone()).unwrap_or_default(),
-                tags: item.organization.as_ref().map(|value| value.tags.clone()).unwrap_or_default(),
-                visual_description: item.visual_analysis.as_ref().map(|analysis| analysis.description.clone()).unwrap_or_default(),
-                visual_tags: item.visual_analysis.as_ref().map(|analysis| analysis.tags.clone()).unwrap_or_default(),
-                visible_text: item.visual_analysis.map(|analysis| analysis.visible_text).unwrap_or_default(),
+                capture_id: manifest.capture_id.clone(),
+                asset_id: item.asset_id,
+                status: decision
+                    .filter(|event| event.status != "pending")
+                    .map(|event| event.status.clone())
+                    .unwrap_or_else(|| {
+                        if item
+                            .organization
+                            .as_ref()
+                            .is_some_and(|value| !value.requires_review)
+                        {
+                            "organized".into()
+                        } else {
+                            "pending".into()
+                        }
+                    }),
+                location: match decision {
+                    Some(event) => event.location.clone(),
+                    None => item
+                        .organization
+                        .as_ref()
+                        .and_then(|value| value.location.clone()),
+                },
+                matter: decision
+                    .map(|event| event.matter.clone())
+                    .or_else(|| item.organization.as_ref().map(|value| value.matter.clone()))
+                    .unwrap_or_default(),
+                tags: decision
+                    .map(|event| event.tags.clone())
+                    .or_else(|| item.organization.as_ref().map(|value| value.tags.clone()))
+                    .unwrap_or_default(),
+                visual_description: item
+                    .visual_analysis
+                    .as_ref()
+                    .map(|analysis| analysis.description.clone())
+                    .unwrap_or_default(),
+                visual_tags: item
+                    .visual_analysis
+                    .as_ref()
+                    .map(|analysis| analysis.tags.clone())
+                    .unwrap_or_default(),
+                visible_text: item
+                    .visual_analysis
+                    .map(|analysis| analysis.visible_text)
+                    .unwrap_or_default(),
             });
         }
     }
     Ok(index)
 }
 
-fn load_capture(destination: &str, workspace: &str, capture_id: &str) -> Result<(PathBuf, Manifest), String> {
+fn load_capture(
+    destination: &str,
+    workspace: &str,
+    capture_id: &str,
+) -> Result<(PathBuf, Manifest), String> {
     let directory = capture_directory(destination, workspace, capture_id)?;
     let manifest = read_latest_manifest(&directory)?;
     if manifest.capture_id != capture_id || manifest.workspace_id != workspace {
@@ -123,10 +252,17 @@ fn load_capture(destination: &str, workspace: &str, capture_id: &str) -> Result<
     Ok((directory, manifest))
 }
 
-fn read_events(directory: &Path, manifest: &Manifest) -> Result<HashMap<String, Vec<ReviewEvent>>, String> {
+fn read_events(
+    directory: &Path,
+    manifest: &Manifest,
+) -> Result<HashMap<String, Vec<ReviewEvent>>, String> {
     let reviews_dir = directory.join("reviews");
     if !reviews_dir.exists() {
         return Ok(HashMap::new());
+    }
+    let reviews_dir = fs::canonicalize(reviews_dir).map_err(|error| error.to_string())?;
+    if !reviews_dir.starts_with(directory) {
+        return Err("Histórico fora da captação.".into());
     }
     let mut files = fs::read_dir(&reviews_dir)
         .map_err(|e| e.to_string())?
@@ -136,15 +272,43 @@ fn read_events(directory: &Path, manifest: &Manifest) -> Result<HashMap<String, 
     files.sort();
     let mut by_asset: HashMap<String, Vec<ReviewEvent>> = HashMap::new();
     for path in files {
-        let event: ReviewEvent = serde_json::from_slice(&fs::read(&path).map_err(|e| e.to_string())?)
-            .map_err(|e| format!("Histórico de revisão inválido ({}): {e}", path.display()))?;
-        if event.capture_id != manifest.capture_id
-            || event.workspace_id != manifest.workspace_id
-            || !manifest.assets.iter().any(|asset| asset.asset_id == event.asset_id)
+        let real = fs::canonicalize(&path).map_err(|error| error.to_string())?;
+        if !real.starts_with(directory)
+            || fs::metadata(&real)
+                .map_err(|error| error.to_string())?
+                .len()
+                > 2_000_000
         {
-            return Err(format!("Revisão fora desta captação: {}", path.display()));
+            return Err("Registro de revisão inválido.".into());
         }
-        by_asset.entry(event.asset_id.clone()).or_default().push(event);
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum SavedReviews {
+            Single(ReviewEvent),
+            Batch(Vec<ReviewEvent>),
+        }
+        let saved: SavedReviews =
+            serde_json::from_slice(&fs::read(&real).map_err(|e| e.to_string())?)
+                .map_err(|e| format!("Histórico de revisão inválido ({}): {e}", path.display()))?;
+        let events = match saved {
+            SavedReviews::Single(event) => vec![event],
+            SavedReviews::Batch(events) => events,
+        };
+        for event in events {
+            if event.capture_id != manifest.capture_id
+                || event.workspace_id != manifest.workspace_id
+                || !manifest
+                    .assets
+                    .iter()
+                    .any(|asset| asset.asset_id == event.asset_id)
+            {
+                return Err(format!("Revisão fora desta captação: {}", path.display()));
+            }
+            by_asset
+                .entry(event.asset_id.clone())
+                .or_default()
+                .push(event);
+        }
     }
     Ok(by_asset)
 }
@@ -153,22 +317,60 @@ fn evidence_for(asset: &crate::ingest::Asset) -> Vec<Evidence> {
     let mut evidence = Vec::new();
     if let Some(metadata) = &asset.metadata {
         if let Some(value) = &metadata.recorded_at {
-            evidence.push(Evidence { kind: "recorded_at".into(), label: "Data registrada".into(), value: value.clone(), source: "FFprobe".into() });
+            evidence.push(Evidence {
+                kind: "recorded_at".into(),
+                label: "Data registrada".into(),
+                value: value.clone(),
+                source: "FFprobe".into(),
+            });
+        }
+        if let Some(value) = &metadata.camera {
+            evidence.push(Evidence {
+                kind: "camera".into(),
+                label: "Câmera registrada".into(),
+                value: value.clone(),
+                source: "FFprobe".into(),
+            });
         }
         if let (Some(width), Some(height)) = (metadata.width, metadata.height) {
-            evidence.push(Evidence { kind: "resolution".into(), label: "Resolução".into(), value: format!("{width} × {height}"), source: "FFprobe".into() });
+            evidence.push(Evidence {
+                kind: "resolution".into(),
+                label: "Resolução".into(),
+                value: format!("{width} × {height}"),
+                source: "FFprobe".into(),
+            });
         }
         if let Some(duration) = metadata.duration_seconds {
-            evidence.push(Evidence { kind: "duration".into(), label: "Duração".into(), value: format!("{duration:.1} s"), source: "FFprobe".into() });
+            evidence.push(Evidence {
+                kind: "duration".into(),
+                label: "Duração".into(),
+                value: format!("{duration:.1} s"),
+                source: "FFprobe".into(),
+            });
         }
         if let Some(value) = &metadata.video_codec {
-            evidence.push(Evidence { kind: "codec".into(), label: "Codec".into(), value: value.clone(), source: "FFprobe".into() });
+            evidence.push(Evidence {
+                kind: "codec".into(),
+                label: "Codec".into(),
+                value: value.clone(),
+                source: "FFprobe".into(),
+            });
         }
         if let Some(gps) = &metadata.gps {
-            evidence.push(Evidence { kind: "gps".into(), label: "GPS embutido".into(), value: format!("{:.5}, {:.5}", gps.latitude, gps.longitude), source: "Metadados da mídia".into() });
+            evidence.push(Evidence {
+                kind: "gps".into(),
+                label: "GPS embutido".into(),
+                value: format!("{:.5}, {:.5}", gps.latitude, gps.longitude),
+                source: "Metadados da mídia".into(),
+            });
         }
         if let Some(label) = &metadata.location_label {
-            evidence.push(Evidence { kind: "location_label".into(), label: "Nome de local embutido".into(), value: label.clone(), source: "Metadados da mídia".into() });
+            evidence.push(Evidence {
+                kind: "location_label".into(),
+                label: "Nome de local embutido".into(),
+                value: label.clone(),
+                source: "Metadados da mídia".into(),
+            });
         }
     }
     evidence
@@ -183,7 +385,10 @@ fn telemetry_values(text: &str, markers: &[&str]) -> Vec<f64> {
             let after = offset + found + marker.len();
             let candidate = lower[after..].trim_start();
             let number = candidate.trim_start_matches(['+', '-']);
-            let digits = number.chars().take_while(|c| c.is_ascii_digit() || *c == '.').count();
+            let digits = number
+                .chars()
+                .take_while(|c| c.is_ascii_digit() || *c == '.')
+                .count();
             let sign = candidate.len() - number.len();
             if let Ok(value) = candidate[..sign + digits].parse::<f64>() {
                 values.push(value);
@@ -197,7 +402,11 @@ fn telemetry_values(text: &str, markers: &[&str]) -> Vec<f64> {
 fn telemetry_track(text: &str) -> Option<((f64, f64), (f64, f64), (f64, f64))> {
     let latitudes = telemetry_values(text, &["latitude:", "lat:"]);
     let longitudes = telemetry_values(text, &["longitude:", "lon:"]);
-    let valid = latitudes.into_iter().zip(longitudes).filter(|(lat, lon)| media::valid_gps(*lat, *lon).is_some()).collect::<Vec<_>>();
+    let valid = latitudes
+        .into_iter()
+        .zip(longitudes)
+        .filter(|(lat, lon)| media::valid_gps(*lat, *lon).is_some())
+        .collect::<Vec<_>>();
     let first = *valid.first()?;
     let last = *valid.last()?;
     let farthest = *valid.iter().max_by(|left, right| {
@@ -211,27 +420,46 @@ fn matching_sidecar<'a>(asset: &Asset, assets: &'a [Asset]) -> Option<&'a Asset>
     assets.iter().find(|candidate| {
         let sidecar = Path::new(&candidate.original_relative_path);
         candidate.status == "verified"
-            && sidecar.extension().and_then(|ext| ext.to_str()).is_some_and(|ext| ext.eq_ignore_ascii_case("srt"))
-            && sidecar.file_stem().and_then(|stem| stem.to_str()).zip(path.file_stem().and_then(|stem| stem.to_str()))
+            && sidecar
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("srt"))
+            && sidecar
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .zip(path.file_stem().and_then(|stem| stem.to_str()))
                 .is_some_and(|(left, right)| left.eq_ignore_ascii_case(right))
-            && sidecar.parent().map(|parent| parent.to_string_lossy().to_ascii_lowercase())
-                == path.parent().map(|parent| parent.to_string_lossy().to_ascii_lowercase())
+            && sidecar
+                .parent()
+                .map(|parent| parent.to_string_lossy().to_ascii_lowercase())
+                == path
+                    .parent()
+                    .map(|parent| parent.to_string_lossy().to_ascii_lowercase())
     })
 }
 
-fn sidecar_track(directory: &Path, asset: &Asset, assets: &[Asset]) -> Option<((f64, f64), (f64, f64), (f64, f64), String)> {
-    if media::kind_for(Path::new(&asset.original_name)) != "video" { return None; }
+fn sidecar_track(
+    directory: &Path,
+    asset: &Asset,
+    assets: &[Asset],
+) -> Option<((f64, f64), (f64, f64), (f64, f64), String)> {
+    if media::kind_for(Path::new(&asset.original_name)) != "video" {
+        return None;
+    }
     let sidecar = matching_sidecar(asset, assets)?;
     let originals = fs::canonicalize(directory.join("originals")).ok()?;
     let path = fs::canonicalize(directory.join(&sidecar.copy_relative_path)).ok()?;
-    if !path.starts_with(originals) || fs::metadata(&path).ok()?.len() > 8_000_000 { return None; }
+    if !path.starts_with(originals) || fs::metadata(&path).ok()?.len() > 8_000_000 {
+        return None;
+    }
     let bytes = fs::read(path).ok()?;
     let (first, last, farthest) = telemetry_track(&String::from_utf8_lossy(&bytes))?;
     Some((first, last, farthest, sidecar.original_name.clone()))
 }
 
 fn sidecar_evidence(directory: &Path, asset: &Asset, assets: &[Asset]) -> Option<Evidence> {
-    let ((first_lat, first_lon), (last_lat, last_lon), farthest, source) = sidecar_track(directory, asset, assets)?;
+    let ((first_lat, first_lon), (last_lat, last_lon), farthest, source) =
+        sidecar_track(directory, asset, assets)?;
     Some(Evidence {
         kind: "drone_track".into(), label: "Trajeto GPS do drone".into(),
         value: format!("início {first_lat:.5}, {first_lon:.5} → fim {last_lat:.5}, {last_lon:.5}; maior afastamento {:.0} m", distance_meters((first_lat, first_lon), farthest)),
@@ -240,11 +468,16 @@ fn sidecar_evidence(directory: &Path, asset: &Asset, assets: &[Asset]) -> Option
 }
 
 fn asset_points(directory: &Path, asset: &Asset, assets: &[Asset]) -> Vec<(f64, f64)> {
-    if let Some(gps) = asset.metadata.as_ref().and_then(|metadata| metadata.gps.as_ref()) {
+    if let Some(gps) = asset
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.gps.as_ref())
+    {
         return vec![(gps.latitude, gps.longitude)];
     }
     sidecar_track(directory, asset, assets)
-        .map(|(first, last, farthest, _)| vec![first, farthest, last]).unwrap_or_default()
+        .map(|(first, last, farthest, _)| vec![first, farthest, last])
+        .unwrap_or_default()
 }
 
 fn distance_meters(a: (f64, f64), b: (f64, f64)) -> f64 {
@@ -258,8 +491,15 @@ fn distance_meters(a: (f64, f64), b: (f64, f64)) -> f64 {
 }
 
 fn span_meters(points: &[(f64, f64)]) -> f64 {
-    points.first().map(|first| points.iter().map(|point| distance_meters(*first, *point))
-        .fold(0.0_f64, f64::max)).unwrap_or(0.0)
+    points
+        .first()
+        .map(|first| {
+            points
+                .iter()
+                .map(|point| distance_meters(*first, *point))
+                .fold(0.0_f64, f64::max)
+        })
+        .unwrap_or(0.0)
 }
 
 struct LocationAnchor {
@@ -270,23 +510,43 @@ struct LocationAnchor {
 }
 
 fn normalized_words(value: &str) -> Vec<String> {
-    value.to_lowercase().chars().map(|c| match c {
-        'á' | 'à' | 'â' | 'ã' | 'ä' => 'a',
-        'é' | 'ê' | 'è' | 'ë' => 'e',
-        'í' | 'ì' | 'î' | 'ï' => 'i',
-        'ó' | 'ò' | 'ô' | 'õ' | 'ö' => 'o',
-        'ú' | 'ù' | 'û' | 'ü' => 'u',
-        'ç' => 'c',
-        other if other.is_ascii_alphanumeric() => other,
-        _ => ' ',
-    }).collect::<String>().split_whitespace().map(str::to_owned).collect()
+    value
+        .to_lowercase()
+        .chars()
+        .map(|c| match c {
+            'á' | 'à' | 'â' | 'ã' | 'ä' => 'a',
+            'é' | 'ê' | 'è' | 'ë' => 'e',
+            'í' | 'ì' | 'î' | 'ï' => 'i',
+            'ó' | 'ò' | 'ô' | 'õ' | 'ö' => 'o',
+            'ú' | 'ù' | 'û' | 'ü' => 'u',
+            'ç' => 'c',
+            other if other.is_ascii_alphanumeric() => other,
+            _ => ' ',
+        })
+        .collect::<String>()
+        .split_whitespace()
+        .map(str::to_owned)
+        .collect()
 }
 
-fn suggestion_for(asset: &Asset, locations: &[String], anchors: &[LocationAnchor], points: &[(f64, f64)]) -> Option<Suggestion> {
+fn suggestion_for(
+    asset: &Asset,
+    locations: &[String],
+    anchors: &[LocationAnchor],
+    points: &[(f64, f64)],
+) -> Option<Suggestion> {
     if let Some(hash) = asset.sha256.as_ref() {
-        let matching = anchors.iter().filter(|anchor| anchor.asset_id != asset.asset_id && anchor.sha256.as_ref() == Some(hash)).collect::<Vec<_>>();
+        let matching = anchors
+            .iter()
+            .filter(|anchor| {
+                anchor.asset_id != asset.asset_id && anchor.sha256.as_ref() == Some(hash)
+            })
+            .collect::<Vec<_>>();
         if let Some(first) = matching.first() {
-            if matching.iter().all(|anchor| anchor.location == first.location) {
+            if matching
+                .iter()
+                .all(|anchor| anchor.location == first.location)
+            {
                 return Some(Suggestion {
                     location: Some(first.location.clone()), matter: None, tags: Vec::new(), confidence: Some(0.98),
                     reason: "Esta mídia tem o mesmo SHA-256 de outra cópia cujo local foi confirmado por um editor. A decisão ainda precisa ser conferida para este take.".into(),
@@ -295,7 +555,11 @@ fn suggestion_for(asset: &Asset, locations: &[String], anchors: &[LocationAnchor
             }
         }
     }
-    if let Some(label) = asset.metadata.as_ref().and_then(|metadata| metadata.location_label.as_ref()) {
+    if let Some(label) = asset
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.location_label.as_ref())
+    {
         return Some(Suggestion {
             location: Some(label.clone()), matter: None, tags: Vec::new(), confidence: Some(0.85),
             reason: "O arquivo contém um nome de local nos metadados. Confirme se a câmera registrou o lugar correto.".into(),
@@ -303,10 +567,16 @@ fn suggestion_for(asset: &Asset, locations: &[String], anchors: &[LocationAnchor
         });
     }
     let filename = normalized_words(&asset.original_name);
-    let matches = locations.iter().filter(|location| {
-        let words = normalized_words(location);
-        !words.is_empty() && filename.windows(words.len()).any(|window| window == words.as_slice())
-    }).collect::<Vec<_>>();
+    let matches = locations
+        .iter()
+        .filter(|location| {
+            let words = normalized_words(location);
+            !words.is_empty()
+                && filename
+                    .windows(words.len())
+                    .any(|window| window == words.as_slice())
+        })
+        .collect::<Vec<_>>();
     if matches.len() == 1 {
         return Some(Suggestion {
             location: Some((*matches[0]).clone()), matter: None, tags: Vec::new(), confidence: Some(0.65),
@@ -317,18 +587,33 @@ fn suggestion_for(asset: &Asset, locations: &[String], anchors: &[LocationAnchor
     if matches.len() > 1 || points.is_empty() || span_meters(points) > 300.0 {
         return None;
     }
-    let nearby = anchors.iter().filter_map(|anchor| {
-        if anchor.asset_id == asset.asset_id || anchor.points.is_empty()
-            || span_meters(&anchor.points) > 300.0 {
-            return None;
-        }
-        let distance = points.iter().map(|point| distance_meters(*point, anchor.points[0]))
-            .fold(0.0_f64, f64::max);
-        (distance <= 300.0).then_some((anchor, distance))
-    }).collect::<Vec<_>>();
+    let nearby = anchors
+        .iter()
+        .filter_map(|anchor| {
+            if anchor.asset_id == asset.asset_id
+                || anchor.points.is_empty()
+                || span_meters(&anchor.points) > 300.0
+            {
+                return None;
+            }
+            let distance = points
+                .iter()
+                .map(|point| distance_meters(*point, anchor.points[0]))
+                .fold(0.0_f64, f64::max);
+            (distance <= 300.0).then_some((anchor, distance))
+        })
+        .collect::<Vec<_>>();
     let first = nearby.first()?;
-    if nearby.iter().any(|(anchor, _)| anchor.location != first.0.location) { return None; }
-    let nearest = nearby.iter().map(|(_, distance)| *distance).fold(f64::INFINITY, f64::min);
+    if nearby
+        .iter()
+        .any(|(anchor, _)| anchor.location != first.0.location)
+    {
+        return None;
+    }
+    let nearest = nearby
+        .iter()
+        .map(|(_, distance)| *distance)
+        .fold(f64::INFINITY, f64::min);
     Some(Suggestion {
         location: Some(first.0.location.clone()), matter: None, tags: Vec::new(), confidence: Some(0.8),
         reason: format!("GPS a cerca de {nearest:.0} m de outra mídia da captação cujo local foi confirmado por um editor. Proximidade não prova que as imagens mostram o mesmo lugar."),
@@ -336,17 +621,29 @@ fn suggestion_for(asset: &Asset, locations: &[String], anchors: &[LocationAnchor
     })
 }
 
-pub fn list_review_items_impl(destination: &str, workspace: &str, capture_id: &str) -> Result<Vec<ReviewItem>, String> {
+pub fn list_review_items_impl(
+    destination: &str,
+    workspace: &str,
+    capture_id: &str,
+) -> Result<Vec<ReviewItem>, String> {
     let (directory, manifest) = load_capture(destination, workspace, capture_id)?;
     let mut events = read_events(&directory, &manifest)?;
-    let anchors = manifest.assets.iter().filter_map(|asset| {
-        let decision = events.get(&asset.asset_id)?.last()?;
-        if decision.status != "confirmed" || asset.status != "verified" { return None; }
-        Some(LocationAnchor {
-            asset_id: asset.asset_id.clone(), location: decision.location.clone()?,
-            sha256: asset.sha256.clone(), points: asset_points(&directory, asset, &manifest.assets),
+    let anchors = manifest
+        .assets
+        .iter()
+        .filter_map(|asset| {
+            let decision = events.get(&asset.asset_id)?.last()?;
+            if decision.status != "confirmed" || asset.status != "verified" {
+                return None;
+            }
+            Some(LocationAnchor {
+                asset_id: asset.asset_id.clone(),
+                location: decision.location.clone()?,
+                sha256: asset.sha256.clone(),
+                points: asset_points(&directory, asset, &manifest.assets),
+            })
         })
-    }).collect::<Vec<_>>();
+        .collect::<Vec<_>>();
     Ok(manifest.assets.iter()
         .filter(|asset| asset.status == "verified" && media::kind_for(Path::new(&asset.original_name)) != "sidecar")
         .map(|asset| {
@@ -393,6 +690,7 @@ pub fn list_review_items_impl(destination: &str, workspace: &str, capture_id: &s
         .collect())
 }
 
+#[cfg(test)]
 pub fn save_review_impl(
     destination: &str,
     workspace: &str,
@@ -404,7 +702,18 @@ pub fn save_review_impl(
     tags: Vec<String>,
     note: &str,
 ) -> Result<ReviewItem, String> {
-    save_review_with_category_impl(destination, workspace, capture_id, asset_id, status, location, matter, tags, note, "")
+    save_review_with_category_impl(
+        destination,
+        workspace,
+        capture_id,
+        asset_id,
+        status,
+        location,
+        matter,
+        tags,
+        note,
+        "",
+    )
 }
 
 pub fn save_review_with_category_impl(
@@ -421,34 +730,34 @@ pub fn save_review_with_category_impl(
 ) -> Result<ReviewItem, String> {
     Uuid::parse_str(asset_id).map_err(|_| "ID de arquivo inválido".to_string())?;
     let (directory, manifest) = load_capture(destination, workspace, capture_id)?;
-    if !manifest.assets.iter().any(|asset| asset.asset_id == asset_id && asset.status == "verified" && media::kind_for(Path::new(&asset.original_name)) != "sidecar") {
+    if !manifest.assets.iter().any(|asset| {
+        asset.asset_id == asset_id
+            && asset.status == "verified"
+            && media::kind_for(Path::new(&asset.original_name)) != "sidecar"
+    }) {
         return Err("Arquivo não revisável nesta captação".into());
     }
-    if !matches!(status, "confirmed" | "unidentified" | "pending") {
-        return Err("Estado de revisão inválido".into());
-    }
-    let location = location.map(|value| value.trim().to_string()).filter(|value| !value.is_empty());
-    if location.as_ref().is_some_and(|value| value.len() > 120) || matter.trim().len() > 120 || note.trim().len() > 1000 || category.trim().len() > 120 {
-        return Err("Local, matéria ou observação excede o limite permitido".into());
-    }
-    if status == "confirmed" && location.is_none() {
-        return Err("Informe um local para confirmar este take".into());
-    }
-    if status != "confirmed" && location.is_some() {
-        return Err("Use confirmação para salvar um local, ou deixe o local vazio".into());
-    }
-    if tags.len() > 20 || tags.iter().any(|tag| tag.trim().is_empty() || tag.trim().len() > 50) {
-        return Err("Informe até 20 tags, com no máximo 50 caracteres cada".into());
-    }
+    let location = location
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    validate_review_fields(status, &location, matter, &tags, note, category)?;
     let matter = matter.trim();
     let note = note.trim();
-    let tags = tags.into_iter().map(|tag| tag.trim().to_string()).collect::<Vec<_>>();
+    let tags = tags
+        .into_iter()
+        .map(|tag| tag.trim().to_string())
+        .collect::<Vec<_>>();
     if let Some(current) = list_review_items_impl(destination, workspace, capture_id)?
-        .into_iter().find(|item| item.asset_id == asset_id)
+        .into_iter()
+        .find(|item| item.asset_id == asset_id)
     {
         if let Some(decision) = &current.decision {
-            if decision.status == status && decision.location == location
-                && decision.matter == matter && decision.tags == tags && decision.note == note && decision.category == category.trim()
+            if decision.status == status
+                && decision.location == location
+                && decision.matter == matter
+                && decision.tags == tags
+                && decision.note == note
+                && decision.category == category.trim()
             {
                 return Ok(current);
             }
@@ -468,27 +777,367 @@ pub fn save_review_with_category_impl(
         tags,
         note: note.into(),
         reviewed_at: now.to_rfc3339(),
+        author: local_actor(),
     };
-    let reviews_dir = directory.join("reviews");
-    fs::create_dir_all(&reviews_dir).map_err(|e| e.to_string())?;
+    let reviews_dir = record_directory(&directory, "reviews")?;
     let filename = format!("{}-{event_id}.json", now.format("%Y%m%dT%H%M%S%9fZ"));
     let final_path = reviews_dir.join(filename);
     let partial_path = final_path.with_extension("partial");
     let bytes = serde_json::to_vec_pretty(&event).map_err(|e| e.to_string())?;
-    let mut writer = OpenOptions::new().write(true).create_new(true).open(&partial_path).map_err(|e| e.to_string())?;
+    let mut writer = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&partial_path)
+        .map_err(|e| e.to_string())?;
     writer.write_all(&bytes).map_err(|e| e.to_string())?;
     writer.sync_all().map_err(|e| e.to_string())?;
     drop(writer);
     fs::rename(&partial_path, &final_path).map_err(|e| e.to_string())?;
     list_review_items_impl(destination, workspace, capture_id)?
-        .into_iter().find(|item| item.asset_id == asset_id)
+        .into_iter()
+        .find(|item| item.asset_id == asset_id)
         .ok_or_else(|| "Revisão salva, mas o arquivo não foi encontrado na leitura".into())
+}
+
+#[derive(Deserialize)]
+pub struct BatchReviewChange {
+    pub asset_ids: Vec<String>,
+    pub expected_event_ids: Vec<String>,
+    pub status: Option<String>,
+    pub location: Option<String>,
+    pub matter: Option<String>,
+    pub tags: Option<Vec<String>>,
+}
+
+pub fn save_review_batch_impl(
+    destination: &str,
+    workspace: &str,
+    capture_id: &str,
+    change: BatchReviewChange,
+) -> Result<Vec<ReviewItem>, String> {
+    if change.asset_ids.is_empty() || change.asset_ids.len() > 500 {
+        return Err("Selecione de 1 a 500 takes.".into());
+    }
+    let (directory, _) = load_capture(destination, workspace, capture_id)?;
+    let items = list_review_items_impl(destination, workspace, capture_id)?;
+    let selected = items
+        .iter()
+        .filter(|item| change.asset_ids.contains(&item.asset_id))
+        .collect::<Vec<_>>();
+    if selected.len() != change.asset_ids.len() {
+        return Err("A seleção contém arquivos inválidos ou repetidos.".into());
+    }
+    let mut current_ids = selected
+        .iter()
+        .map(|item| {
+            item.organization
+                .as_ref()
+                .map(|value| value.event_id.clone())
+                .or_else(|| item.decision.as_ref().map(|value| value.event_id.clone()))
+                .unwrap_or_else(|| item.asset_id.clone())
+        })
+        .collect::<Vec<_>>();
+    let mut expected = change.expected_event_ids;
+    current_ids.sort();
+    expected.sort();
+    if current_ids != expected {
+        return Err("A revisão mudou. Atualize antes de aplicar o lote.".into());
+    }
+    let now = Utc::now();
+    let mut events = Vec::new();
+    for item in selected {
+        let decision = item.decision.as_ref();
+        let organization = item.organization.as_ref();
+        let status = change
+            .status
+            .as_deref()
+            .or_else(|| decision.map(|value| value.status.as_str()))
+            .unwrap_or("pending");
+        let location = if status == "confirmed" {
+            change
+                .location
+                .clone()
+                .or_else(|| decision.and_then(|value| value.location.clone()))
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+        } else {
+            None
+        };
+        let matter = change
+            .matter
+            .as_deref()
+            .or_else(|| decision.map(|value| value.matter.as_str()))
+            .or_else(|| organization.map(|value| value.matter.as_str()))
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        let tags = change
+            .tags
+            .clone()
+            .or_else(|| decision.map(|value| value.tags.clone()))
+            .or_else(|| organization.map(|value| value.tags.clone()))
+            .unwrap_or_default()
+            .into_iter()
+            .map(|tag| tag.trim().to_string())
+            .collect::<Vec<_>>();
+        let category = decision
+            .map(|value| value.category.clone())
+            .or_else(|| organization.map(|value| value.category.clone()))
+            .unwrap_or_default();
+        let note = decision.map(|value| value.note.clone()).unwrap_or_default();
+        validate_review_fields(status, &location, &matter, &tags, &note, &category)?;
+        events.push(ReviewEvent {
+            event_id: Uuid::new_v4().to_string(),
+            capture_id: capture_id.into(),
+            workspace_id: workspace.into(),
+            asset_id: item.asset_id.clone(),
+            status: status.into(),
+            location,
+            matter,
+            tags,
+            note,
+            reviewed_at: now.to_rfc3339(),
+            category,
+            author: local_actor(),
+        });
+    }
+    // One atomic record for the whole batch, after validating every selected take.
+    let folder = record_directory(&directory, "reviews")?;
+    let path = folder.join(format!(
+        "{}-{}.json",
+        now.format("%Y%m%dT%H%M%S%9fZ"),
+        Uuid::new_v4()
+    ));
+    let partial = path.with_extension("partial");
+    let mut writer = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&partial)
+        .map_err(|error| error.to_string())?;
+    serde_json::to_writer_pretty(&mut writer, &events).map_err(|error| error.to_string())?;
+    writer.sync_all().map_err(|error| error.to_string())?;
+    drop(writer);
+    fs::rename(partial, path).map_err(|error| error.to_string())?;
+    list_review_items_impl(destination, workspace, capture_id)
+}
+
+pub fn restore_previous_review_impl(
+    destination: &str,
+    workspace: &str,
+    capture_id: &str,
+    asset_id: &str,
+) -> Result<ReviewItem, String> {
+    let item = list_review_items_impl(destination, workspace, capture_id)?
+        .into_iter()
+        .find(|item| item.asset_id == asset_id)
+        .ok_or("Take não encontrado")?;
+    if item.history.is_empty() {
+        return Err("Não há revisão salva para desfazer".into());
+    }
+    let Some(previous) = item.history.iter().rev().nth(1) else {
+        return save_review_with_category_impl(
+            destination,
+            workspace,
+            capture_id,
+            asset_id,
+            "pending",
+            None,
+            "",
+            vec![],
+            "Primeira decisão desfeita; take voltou a ficar pendente.",
+            "",
+        );
+    };
+    save_review_with_category_impl(
+        destination,
+        workspace,
+        capture_id,
+        asset_id,
+        &previous.status,
+        previous.location.clone(),
+        &previous.matter,
+        previous.tags.clone(),
+        &previous.note,
+        &previous.category,
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::ingest::ingest_capture_impl;
+
+    #[test]
+    fn batch_is_atomic_and_approval_restore_and_export_preserve_history() {
+        let root = std::env::temp_dir().join(format!("lumen-batch-{}", Uuid::new_v4()));
+        let source = root.join("card");
+        let destination = root.join("archive");
+        fs::create_dir_all(&source).unwrap();
+        fs::create_dir_all(&destination).unwrap();
+        fs::write(source.join("C001.MP4"), b"first original").unwrap();
+        fs::write(source.join("C002.MP4"), b"second original").unwrap();
+        let capture = ingest_capture_impl(
+            source.to_str().unwrap(),
+            destination.to_str().unwrap(),
+            "personal",
+            "Test",
+            "",
+            vec![],
+            Some(root.to_str().unwrap()),
+        )
+        .unwrap();
+        let ids = capture
+            .assets
+            .iter()
+            .map(|asset| asset.asset_id.clone())
+            .collect::<Vec<_>>();
+        let change = |location: &str| BatchReviewChange {
+            asset_ids: ids.clone(),
+            expected_event_ids: ids.clone(),
+            status: Some("confirmed".into()),
+            location: Some(location.into()),
+            matter: Some("Vendas".into()),
+            tags: Some(vec!["lojas".into()]),
+        };
+        assert!(save_review_batch_impl(
+            destination.to_str().unwrap(),
+            "personal",
+            &capture.capture_id,
+            change(&"x".repeat(121))
+        )
+        .is_err());
+        assert!(list_review_items_impl(
+            destination.to_str().unwrap(),
+            "personal",
+            &capture.capture_id
+        )
+        .unwrap()
+        .iter()
+        .all(|item| item.history.is_empty()));
+        let items = save_review_batch_impl(
+            destination.to_str().unwrap(),
+            "personal",
+            &capture.capture_id,
+            change("Shopping Vitória"),
+        )
+        .unwrap();
+        assert!(items.iter().all(|item| item.history.len() == 1
+            && item.decision.as_ref().unwrap().author.starts_with("local:")));
+        let event_ids = items
+            .iter()
+            .map(|item| item.organization.as_ref().unwrap().event_id.clone())
+            .collect::<Vec<_>>();
+        let approval = approve_organization_impl(
+            destination.to_str().unwrap(),
+            "personal",
+            &capture.capture_id,
+            event_ids.clone(),
+        )
+        .unwrap();
+        let plan = export::plan(
+            destination.to_str().unwrap(),
+            "personal",
+            &capture.capture_id,
+        )
+        .unwrap();
+        for file in &plan.files {
+            let parts = Path::new(&file.relative_path)
+                .components()
+                .collect::<Vec<_>>();
+            assert!(parts[0]
+                .as_os_str()
+                .to_string_lossy()
+                .starts_with("Shopping Vitória-"));
+            assert!(parts[1]
+                .as_os_str()
+                .to_string_lossy()
+                .starts_with("Vendas-"));
+        }
+        let first_export = export::export(
+            destination.to_str().unwrap(),
+            "personal",
+            &capture.capture_id,
+            &approval.approval_id,
+            |_| {},
+        )
+        .unwrap();
+        assert_eq!(first_export.copied, 2);
+        assert!(first_export.errors.is_empty());
+        let second_export = export::export(
+            destination.to_str().unwrap(),
+            "personal",
+            &capture.capture_id,
+            &approval.approval_id,
+            |_| {},
+        )
+        .unwrap();
+        assert_eq!(second_export.reused, 2);
+        assert!(second_export.errors.is_empty());
+        revoke_organization_impl(
+            destination.to_str().unwrap(),
+            "personal",
+            &capture.capture_id,
+            &approval.approval_id,
+        )
+        .unwrap();
+        assert!(get_organization_approval_impl(
+            destination.to_str().unwrap(),
+            "personal",
+            &capture.capture_id
+        )
+        .unwrap()
+        .is_none());
+        let new_approval = approve_organization_impl(
+            destination.to_str().unwrap(),
+            "personal",
+            &capture.capture_id,
+            event_ids,
+        )
+        .unwrap();
+        assert_ne!(new_approval.approval_id, approval.approval_id);
+        save_review_impl(
+            destination.to_str().unwrap(),
+            "personal",
+            &capture.capture_id,
+            &ids[0],
+            "unidentified",
+            None,
+            "Empregos",
+            vec![],
+            "",
+        )
+        .unwrap();
+        let restored = restore_previous_review_impl(
+            destination.to_str().unwrap(),
+            "personal",
+            &capture.capture_id,
+            &ids[0],
+        )
+        .unwrap();
+        assert_eq!(restored.decision.as_ref().unwrap().matter, "Vendas");
+        assert_eq!(restored.history.len(), 3);
+        let first_undone = restore_previous_review_impl(
+            destination.to_str().unwrap(),
+            "personal",
+            &capture.capture_id,
+            &ids[1],
+        )
+        .unwrap();
+        assert_eq!(first_undone.decision.as_ref().unwrap().status, "pending");
+        assert_eq!(first_undone.history.len(), 2);
+        assert!(get_organization_approval_impl(
+            destination.to_str().unwrap(),
+            "personal",
+            &capture.capture_id
+        )
+        .unwrap()
+        .is_none());
+        assert_eq!(
+            fs::read(source.join("C001.MP4")).unwrap(),
+            b"first original"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn review_is_append_only_and_does_not_change_origin() {
@@ -498,24 +1147,107 @@ mod tests {
         fs::create_dir_all(&source).unwrap();
         fs::create_dir_all(&destination).unwrap();
         fs::write(source.join("C001.MP4"), b"test media").unwrap();
-        let capture = ingest_capture_impl(source.to_str().unwrap(), destination.to_str().unwrap(), "personal", "Praias", "Teste", vec![], None).unwrap();
+        let capture = ingest_capture_impl(
+            source.to_str().unwrap(),
+            destination.to_str().unwrap(),
+            "personal",
+            "Praias",
+            "Teste",
+            vec![],
+            None,
+        )
+        .unwrap();
         let asset_id = capture.assets[0].asset_id.clone();
-        let initial = list_review_items_impl(destination.to_str().unwrap(), "personal", &capture.capture_id).unwrap();
+        let initial = list_review_items_impl(
+            destination.to_str().unwrap(),
+            "personal",
+            &capture.capture_id,
+        )
+        .unwrap();
         assert!(initial[0].suggestion.is_none());
         assert!(initial[0].decision.is_none());
-        let first = save_review_impl(destination.to_str().unwrap(), "personal", &capture.capture_id, &asset_id, "confirmed", Some("Praia do Morro".into()), "Verão", vec!["praia".into()], "Confirmado pelo editor").unwrap();
-        assert_eq!(first.decision.as_ref().unwrap().location.as_deref(), Some("Praia do Morro"));
-        let second = save_review_impl(destination.to_str().unwrap(), "personal", &capture.capture_id, &asset_id, "unidentified", None, "Verão", vec!["mar".into()], "Local incerto").unwrap();
+        let first = save_review_impl(
+            destination.to_str().unwrap(),
+            "personal",
+            &capture.capture_id,
+            &asset_id,
+            "confirmed",
+            Some("Praia do Morro".into()),
+            "Verão",
+            vec!["praia".into()],
+            "Confirmado pelo editor",
+        )
+        .unwrap();
+        assert_eq!(
+            first.decision.as_ref().unwrap().location.as_deref(),
+            Some("Praia do Morro")
+        );
+        let second = save_review_impl(
+            destination.to_str().unwrap(),
+            "personal",
+            &capture.capture_id,
+            &asset_id,
+            "unidentified",
+            None,
+            "Verão",
+            vec!["mar".into()],
+            "Local incerto",
+        )
+        .unwrap();
         assert_eq!(second.history.len(), 2);
         assert_eq!(second.decision.as_ref().unwrap().status, "unidentified");
-        let same = save_review_impl(destination.to_str().unwrap(), "personal", &capture.capture_id, &asset_id, "unidentified", None, "Verão", vec!["mar".into()], "Local incerto").unwrap();
+        let same = save_review_impl(
+            destination.to_str().unwrap(),
+            "personal",
+            &capture.capture_id,
+            &asset_id,
+            "unidentified",
+            None,
+            "Verão",
+            vec!["mar".into()],
+            "Local incerto",
+        )
+        .unwrap();
         assert_eq!(same.history.len(), 2);
         let index = list_review_index_impl(destination.to_str().unwrap(), "personal").unwrap();
         assert_eq!(index.len(), 1);
         assert_eq!(index[0].tags, vec!["mar"]);
+        save_review_impl(
+            destination.to_str().unwrap(),
+            "personal",
+            &capture.capture_id,
+            &asset_id,
+            "pending",
+            None,
+            "Nova pauta",
+            vec!["nova".into()],
+            "A conferir",
+        )
+        .unwrap();
+        let pending_index =
+            list_review_index_impl(destination.to_str().unwrap(), "personal").unwrap();
+        assert_eq!(pending_index[0].status, "pending");
+        assert_eq!(pending_index[0].matter, "Nova pauta");
+        assert_eq!(pending_index[0].tags, vec!["nova"]);
         assert_eq!(fs::read(source.join("C001.MP4")).unwrap(), b"test media");
-        assert!(save_review_impl(destination.to_str().unwrap(), "personal", &capture.capture_id, &asset_id, "confirmed", None, "", vec![], "").is_err());
-        assert!(list_review_items_impl(destination.to_str().unwrap(), "other", &capture.capture_id).is_err());
+        assert!(save_review_impl(
+            destination.to_str().unwrap(),
+            "personal",
+            &capture.capture_id,
+            &asset_id,
+            "confirmed",
+            None,
+            "",
+            vec![],
+            ""
+        )
+        .is_err());
+        assert!(list_review_items_impl(
+            destination.to_str().unwrap(),
+            "other",
+            &capture.capture_id
+        )
+        .is_err());
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -530,15 +1262,50 @@ mod tests {
         fs::write(source.join("Shopping_Vitoria_C001.SRT"),
             "1\n00:00:00,000 --> 00:00:01,000\n[latitude: -20.29001] [longitude: -40.29002]\n\n2\n00:00:01,000 --> 00:00:02,000\n[latitude: -20.29111] [longitude: -40.29112]").unwrap();
         fs::write(source.join("C001.MP4"), b"another video").unwrap();
-        let capture = ingest_capture_impl(source.to_str().unwrap(), destination.to_str().unwrap(), "personal", "Teste", "", vec!["Shopping Vitória".into(), "Praia do Morro".into()], None).unwrap();
-        let items = list_review_items_impl(destination.to_str().unwrap(), "personal", &capture.capture_id).unwrap();
-        let named = items.iter().find(|item| item.original_name == "Shopping_Vitoria_C001.MP4").unwrap();
-        assert_eq!(named.suggestion.as_ref().unwrap().location.as_deref(), Some("Shopping Vitória"));
-        assert!(named.evidence.iter().any(|evidence| evidence.kind == "drone_track" && evidence.value.contains("-20.29111")));
-        let unnamed = items.iter().find(|item| item.original_name == "C001.MP4").unwrap();
+        let capture = ingest_capture_impl(
+            source.to_str().unwrap(),
+            destination.to_str().unwrap(),
+            "personal",
+            "Teste",
+            "",
+            vec!["Shopping Vitória".into(), "Praia do Morro".into()],
+            None,
+        )
+        .unwrap();
+        let items = list_review_items_impl(
+            destination.to_str().unwrap(),
+            "personal",
+            &capture.capture_id,
+        )
+        .unwrap();
+        let named = items
+            .iter()
+            .find(|item| item.original_name == "Shopping_Vitoria_C001.MP4")
+            .unwrap();
+        assert_eq!(
+            named.suggestion.as_ref().unwrap().location.as_deref(),
+            Some("Shopping Vitória")
+        );
+        assert!(
+            named
+                .evidence
+                .iter()
+                .any(|evidence| evidence.kind == "drone_track"
+                    && evidence.value.contains("-20.29111"))
+        );
+        let unnamed = items
+            .iter()
+            .find(|item| item.original_name == "C001.MP4")
+            .unwrap();
         assert!(unnamed.suggestion.is_none());
-        assert!(!unnamed.evidence.iter().any(|evidence| evidence.kind == "drone_track"));
-        assert_eq!(fs::read(source.join("Shopping_Vitoria_C001.MP4")).unwrap(), b"video test");
+        assert!(!unnamed
+            .evidence
+            .iter()
+            .any(|evidence| evidence.kind == "drone_track"));
+        assert_eq!(
+            fs::read(source.join("Shopping_Vitoria_C001.MP4")).unwrap(),
+            b"video test"
+        );
         fs::remove_dir_all(root).unwrap();
     }
 }
@@ -550,15 +1317,28 @@ pub struct OrganizationApproval {
     workspace_id: String,
     approved_at: String,
     decisions: Vec<ReviewEvent>,
+    #[serde(default)]
+    approved_by: String,
 }
 
-fn current_approval_decisions(destination: &str, workspace: &str, capture_id: &str) -> Result<Vec<ReviewEvent>, String> {
+fn current_approval_decisions(
+    destination: &str,
+    workspace: &str,
+    capture_id: &str,
+) -> Result<Vec<ReviewEvent>, String> {
     let (_, manifest) = load_capture(destination, workspace, capture_id)?;
-    if manifest.assets.iter().any(|asset| asset.status != "verified" && media::kind_for(Path::new(&asset.original_name)) != "sidecar") {
-        return Err("Há mídias com falha de cópia. Resolva essas falhas antes de aprovar a organização.".into());
+    if manifest.assets.iter().any(|asset| {
+        asset.status != "verified" && media::kind_for(Path::new(&asset.original_name)) != "sidecar"
+    }) {
+        return Err(
+            "Há mídias com falha de cópia. Resolva essas falhas antes de aprovar a organização."
+                .into(),
+        );
     }
     let items = list_review_items_impl(destination, workspace, capture_id)?;
-    if items.is_empty() { return Err("Não há mídias verificadas para aprovar.".into()); }
+    if items.is_empty() {
+        return Err("Não há mídias verificadas para aprovar.".into());
+    }
     let mut decisions = Vec::new();
     for item in items {
         let proposal = item.organization.as_ref().filter(|value| !value.requires_review)
@@ -570,63 +1350,144 @@ fn current_approval_decisions(destination: &str, workspace: &str, capture_id: &s
             decisions.push(ReviewEvent { event_id: proposal.event_id.clone(), capture_id: capture_id.into(), workspace_id: workspace.into(),
                 asset_id: item.asset_id.clone(), category: proposal.category.clone(), status: "ai_organized".into(), location: proposal.location.clone(), matter: proposal.matter.clone(), tags: proposal.tags.clone(),
                 note: format!("Grupo: {}. Organização automática por Qwen3-VL; local não confirmado por pessoa.", proposal.category),
-                reviewed_at: item.visual_analysis.as_ref().map(|analysis| analysis.analyzed_at.clone()).unwrap_or_default() });
+                reviewed_at: item.visual_analysis.as_ref().map(|analysis| analysis.analyzed_at.clone()).unwrap_or_default(), author: "model:qwen3-vl".into() });
         }
     }
     decisions.sort_by(|left, right| left.asset_id.cmp(&right.asset_id));
     Ok(decisions)
 }
 
-pub fn get_organization_approval_impl(destination: &str, workspace: &str, capture_id: &str) -> Result<Option<OrganizationApproval>, String> {
+pub fn get_organization_approval_impl(
+    destination: &str,
+    workspace: &str,
+    capture_id: &str,
+) -> Result<Option<OrganizationApproval>, String> {
     let (directory, _) = load_capture(destination, workspace, capture_id)?;
     let approvals = directory.join("organization-approvals");
-    if !approvals.exists() { return Ok(None); }
+    if !approvals.exists() {
+        return Ok(None);
+    }
     let current = match current_approval_decisions(destination, workspace, capture_id) {
         Ok(decisions) => decisions,
         Err(_) => return Ok(None),
     };
-    let mut paths = fs::read_dir(approvals).map_err(|error| error.to_string())?
-        .map(|entry| entry.map(|entry| entry.path()).map_err(|error| error.to_string()))
+    let mut paths = fs::read_dir(approvals)
+        .map_err(|error| error.to_string())?
+        .map(|entry| {
+            entry
+                .map(|entry| entry.path())
+                .map_err(|error| error.to_string())
+        })
         .collect::<Result<Vec<_>, _>>()?;
     paths.retain(|path| path.extension().and_then(|extension| extension.to_str()) == Some("json"));
     paths.sort();
-    let Some(path) = paths.last() else { return Ok(None); };
-    let saved: OrganizationApproval = serde_json::from_slice(&fs::read(path).map_err(|error| error.to_string())?)
-        .map_err(|error| format!("Registro de aprovação inválido: {error}"))?;
+    let Some(path) = paths.last() else {
+        return Ok(None);
+    };
+    let saved: OrganizationApproval =
+        serde_json::from_slice(&fs::read(path).map_err(|error| error.to_string())?)
+            .map_err(|error| format!("Registro de aprovação inválido: {error}"))?;
     if saved.capture_id != capture_id || saved.workspace_id != workspace {
         return Err("A aprovação não pertence a esta captação e espaço.".into());
     }
-    let mut saved_ids = saved.decisions.iter().map(|event| event.event_id.as_str()).collect::<Vec<_>>();
-    let mut current_ids = current.iter().map(|event| event.event_id.as_str()).collect::<Vec<_>>();
-    saved_ids.sort(); current_ids.sort();
+    Uuid::parse_str(&saved.approval_id).map_err(|_| "ID de aprovação inválido")?;
+    if directory
+        .join("organization-revocations")
+        .join(format!("{}.json", saved.approval_id))
+        .exists()
+    {
+        return Ok(None);
+    }
+    let mut saved_ids = saved
+        .decisions
+        .iter()
+        .map(|event| event.event_id.as_str())
+        .collect::<Vec<_>>();
+    let mut current_ids = current
+        .iter()
+        .map(|event| event.event_id.as_str())
+        .collect::<Vec<_>>();
+    saved_ids.sort();
+    current_ids.sort();
     Ok((saved_ids == current_ids).then_some(saved))
 }
 
-pub fn approve_organization_impl(destination: &str, workspace: &str, capture_id: &str, mut expected_event_ids: Vec<String>) -> Result<OrganizationApproval, String> {
+pub fn approve_organization_impl(
+    destination: &str,
+    workspace: &str,
+    capture_id: &str,
+    mut expected_event_ids: Vec<String>,
+) -> Result<OrganizationApproval, String> {
     let (directory, _) = load_capture(destination, workspace, capture_id)?;
     let decisions = current_approval_decisions(destination, workspace, capture_id)?;
-    let mut current_ids = decisions.iter().map(|event| event.event_id.clone()).collect::<Vec<_>>();
-    current_ids.sort(); expected_event_ids.sort();
+    let mut current_ids = decisions
+        .iter()
+        .map(|event| event.event_id.clone())
+        .collect::<Vec<_>>();
+    current_ids.sort();
+    expected_event_ids.sort();
     if current_ids != expected_event_ids {
         return Err("A revisão foi alterada. Atualize os takes e confira antes de aprovar.".into());
     }
-    if let Some(saved) = get_organization_approval_impl(destination, workspace, capture_id)? { return Ok(saved); }
+    if let Some(saved) = get_organization_approval_impl(destination, workspace, capture_id)? {
+        return Ok(saved);
+    }
     let now = Utc::now();
     let approval = OrganizationApproval {
-        approval_id: Uuid::new_v4().to_string(), capture_id: capture_id.into(), workspace_id: workspace.into(),
-        approved_at: now.to_rfc3339(), decisions,
+        approval_id: Uuid::new_v4().to_string(),
+        capture_id: capture_id.into(),
+        workspace_id: workspace.into(),
+        approved_at: now.to_rfc3339(),
+        decisions,
+        approved_by: local_actor(),
     };
-    let approvals = directory.join("organization-approvals");
-    fs::create_dir_all(&approvals).map_err(|error| error.to_string())?;
-    let path = approvals.join(format!("{}-{}.json", now.format("%Y%m%dT%H%M%S%9fZ"), approval.approval_id));
+    let approvals = record_directory(&directory, "organization-approvals")?;
+    let path = approvals.join(format!(
+        "{}-{}.json",
+        now.format("%Y%m%dT%H%M%S%9fZ"),
+        approval.approval_id
+    ));
     let partial = path.with_extension("partial");
     let bytes = serde_json::to_vec_pretty(&approval).map_err(|error| error.to_string())?;
-    let mut writer = OpenOptions::new().write(true).create_new(true).open(&partial).map_err(|error| error.to_string())?;
-    writer.write_all(&bytes).map_err(|error| error.to_string())?;
+    let mut writer = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&partial)
+        .map_err(|error| error.to_string())?;
+    writer
+        .write_all(&bytes)
+        .map_err(|error| error.to_string())?;
     writer.sync_all().map_err(|error| error.to_string())?;
     drop(writer);
     fs::rename(partial, path).map_err(|error| error.to_string())?;
     Ok(approval)
+}
+
+pub fn revoke_organization_impl(
+    destination: &str,
+    workspace: &str,
+    capture_id: &str,
+    expected_approval_id: &str,
+) -> Result<(), String> {
+    let approval = get_organization_approval_impl(destination, workspace, capture_id)?
+        .ok_or("Não há aprovação atual para desfazer")?;
+    if approval.approval_id != expected_approval_id {
+        return Err("A aprovação mudou. Atualize antes de desfazer.".into());
+    }
+    let (directory, _) = load_capture(destination, workspace, capture_id)?;
+    let folder = record_directory(&directory, "organization-revocations")?;
+    let path = folder.join(format!("{}.json", approval.approval_id));
+    let partial = folder.join(format!("{}.partial", Uuid::new_v4()));
+    let mut writer = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&partial)
+        .map_err(|error| error.to_string())?;
+    serde_json::to_writer_pretty(&mut writer, &serde_json::json!({"approval_id":approval.approval_id,"capture_id":capture_id,"workspace_id":workspace,"revoked_at":Utc::now().to_rfc3339(),"author":local_actor()})).map_err(|error| error.to_string())?;
+    writer.sync_all().map_err(|error| error.to_string())?;
+    drop(writer);
+    fs::rename(partial, path).map_err(|error| error.to_string())?;
+    Ok(())
 }
 
 #[path = "export.rs"]
