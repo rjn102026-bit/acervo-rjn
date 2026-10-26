@@ -36,9 +36,9 @@ Para abrir o aplicativo **sem servidor de desenvolvimento**, use `apps/desktop/s
 
 No desktop, selecione **pastas já existentes** de origem e destino em volumes/pastas separados. O espaço digitado é apenas uma separação local provisória: não é autenticação e não deve ser usado como isolamento de clientes em uma versão distribuída. Contas, associação usuário-espaço e autorização virão com a API central.
 
-Para este piloto, o aplicativo procura `ffprobe` e `ffmpeg` na instalação do Chocolatey no Windows e, como alternativa, no `PATH` do sistema; o usuário não informa caminho no formulário. Se não estiverem disponíveis, a cópia verificada continua funcionando e o manifesto registra a falha do processamento. Depois de disponibilizar as ferramentas, a tela de Processamento permite tentar novamente metadados/miniaturas das cópias verificadas; ela não repete a ingestão nem corrige cópias com falha. O MVP ainda não inclui os binários FFmpeg no instalador. Antes de distribuir a outros usuários, é preciso resolver o empacotamento e as obrigações de licença; a dependência manual atual não é a experiência final.
+O instalador Windows inclui FFmpeg e FFprobe na variante LGPL shared, com DLLs, licença e proveniência verificadas por SHA-256. O aplicativo prioriza as ferramentas incluídas; Chocolatey e PATH ficam como alternativas de desenvolvimento. A primeira abertura verifica as ferramentas e orienta a configuração opcional do Ollama; o modelo pode ser baixado pelo próprio Lumen. Consulte [DISTRIBUICAO_WINDOWS.md](DISTRIBUICAO_WINDOWS.md) para gerar o pacote, requisitos e limites de homologação.
 
-O ícone verde com “L” é **provisório**, criado apenas para satisfazer o empacotamento Windows; a identidade RJN final precisa substituí-lo antes da distribuição.
+A marca RJN exportada do Figma identifica o Lumen no aplicativo e nos ícones de distribuição. O SVG original está em `apps/desktop/src/assets/rjn-mark.svg`.
 
 ## Protótipo de validação da regra
 
