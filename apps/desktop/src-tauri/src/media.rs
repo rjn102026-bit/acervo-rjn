@@ -5,6 +5,35 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::time::{Duration, Instant};
+use std::sync::OnceLock;
+
+static BUNDLED_TOOLS: OnceLock<PathBuf> = OnceLock::new();
+
+pub fn configure_bundled_tools(directory: PathBuf) {
+    let _ = BUNDLED_TOOLS.set(directory);
+}
+
+#[derive(Serialize)]
+pub struct ToolStatus {
+    pub name: String,
+    pub available: bool,
+    pub bundled: bool,
+    pub version: Option<String>,
+}
+
+pub fn tool_status(name: &str) -> ToolStatus {
+    let tool = executable(None, name);
+    let bundled = tool.as_ref().ok().is_some_and(|path|
+        BUNDLED_TOOLS.get().is_some_and(|directory| path.starts_with(directory)));
+    let version = tool.and_then(|path| {
+        let mut command = media_command(&path);
+        command.arg("-version");
+        let result = run_command(command, Duration::from_secs(10))?;
+        if !result.status.success() { return Err("Ferramenta indisponível".into()); }
+        Ok(String::from_utf8_lossy(&result.stdout).lines().next().unwrap_or("").chars().take(180).collect::<String>())
+    }).ok();
+    ToolStatus { name: name.into(), available: version.is_some(), bundled, version }
+}
 
 /// Bound external tools independently of the HTTP timeout used by the AI.
 pub(crate) fn run_command(mut command: Command, timeout: Duration) -> Result<Output, String> {
@@ -198,6 +227,12 @@ fn executable(directory: Option<&str>, name: &str) -> Result<PathBuf, String> {
         }
         Ok(path)
     } else {
+        if let Some(directory) = BUNDLED_TOOLS.get() {
+            let path = directory.join(if cfg!(windows) { format!("{name}.exe") } else { name.into() });
+            if path.is_file() {
+                return Ok(path);
+            }
+        }
         if cfg!(windows) {
             let file_name = format!("{name}.exe");
             let chocolatey = std::env::var_os("ChocolateyInstall")

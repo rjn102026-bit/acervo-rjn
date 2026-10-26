@@ -11,3 +11,4 @@ __pycache__/
 *.db
 *.sqlite3
 ingested/
+apps/desktop/src-tauri/resources/ffmpeg/

@@ -127,8 +127,10 @@ button:not(:disabled):hover {
   gap: 10px;
 }
 .brand-mark {
-  background: var(--brand);
-  font-weight: 600;
+  background: transparent;
+  border-radius: 0;
+  object-fit: contain;
+  flex: 0 0 38px;
 }
 .brand strong {
   font-size: 17px;

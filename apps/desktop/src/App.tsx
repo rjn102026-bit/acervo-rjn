@@ -4,7 +4,9 @@ import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import navIdle from "./assets/nav-idle.svg";
 import navActive from "./assets/nav-active.svg";
+import rjnMark from "./assets/rjn-mark.svg";
 import interLicenseUrl from "./assets/fonts/LICENSE.txt?url";
+import SetupDialog from "./SetupDialog";
 import {
   aiOrganized,
   filterReviewItems,
@@ -339,6 +341,8 @@ function Thumbnail({
 }
 
 export default function App() {
+  const [setupOpen, setSetupOpen] = useState(() =>
+    !!window.__TAURI_INTERNALS__ && !readStored<boolean>("lumen.setup.v1", false));
   const [initial] = useState(initialSettings);
   const [page, setPage] = useState<Page>(
     initial.destination ? "Acervo" : "Nova ingestão",
@@ -1744,12 +1748,20 @@ export default function App() {
 
   return (
     <div className="app-shell">
+      {setupOpen && <SetupDialog
+        onClose={() => setSetupOpen(false)}
+        onContinue={() => {
+          writeStored("lumen.setup.v1", true);
+          setSetupOpen(false);
+          void refreshOllama();
+        }}
+      />}
       <aside className="sidebar">
         <div className="brand">
-          <span className="brand-mark">L</span>
+          <img className="brand-mark" src={rjnMark} alt="RJN Systems" />
           <div>
             <strong>LUMEN</strong>
-            <small>DESKTOP</small>
+            <small>por RJN Systems</small>
           </div>
         </div>
         <nav aria-label="Navegação principal">
@@ -2188,6 +2200,9 @@ export default function App() {
               Pastas e espaço de trabalho{" "}
               <span>{workspace || "não definido"}</span>
             </summary>
+            <button className="secondary" type="button" onClick={() => setSetupOpen(true)}>
+              Verificar instalação e IA
+            </button>
             <h2>
               {page === "Nova ingestão"
                 ? "De onde vêm e onde ficam os arquivos"

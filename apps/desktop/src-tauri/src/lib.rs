@@ -10,6 +10,7 @@ mod media;
 mod preview;
 mod review;
 mod source;
+mod setup;
 
 use ingest::{reprocess_capture_impl, thumbnail_data_url_impl, Manifest};
 use preview::{create_preview_impl, PreviewDescriptor, PreviewState};
@@ -18,7 +19,29 @@ use review::{
     ReviewSearchEntry,
 };
 use std::sync::Arc;
-use tauri::Emitter;
+use tauri::{Emitter, Manager};
+
+#[tauri::command]
+async fn get_installation_status() -> Result<setup::InstallationStatus, String> {
+    tauri::async_runtime::spawn_blocking(setup::status).await.map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn download_ai_model(
+    state: tauri::State<'_, Arc<ai::AiState>>,
+    window: tauri::Window,
+) -> Result<ai::OllamaStatus, String> {
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = state.0.try_lock().map_err(|_| "Já existe uma operação de IA em andamento.")?;
+        setup::download_model(|progress| { let _ = window.emit("setup-model-progress", progress); })
+    }).await.map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+fn open_setup_link(target: String) -> Result<(), String> {
+    setup::open_link(&target)
+}
 
 #[derive(Default)]
 struct IngestState(std::sync::Mutex<()>);
@@ -360,6 +383,14 @@ pub fn run() {
     let preview_state = Arc::new(PreviewState::default());
     let protocol_state = preview_state.clone();
     tauri::Builder::default()
+        .setup(|app| {
+            let icon = tauri::image::Image::from_bytes(include_bytes!("../icons/128x128.png"))?;
+            for window in app.webview_windows().values() {
+                window.set_icon(icon.clone())?;
+            }
+            media::configure_bundled_tools(app.path().resource_dir()?.join("ffmpeg").join("bin"));
+            Ok(())
+        })
         .plugin(tauri_plugin_dialog::init())
         .manage(preview_state)
         .manage(Arc::new(ai::AiState::default()))
@@ -371,6 +402,9 @@ pub fn run() {
             },
         )
         .invoke_handler(tauri::generate_handler![
+            get_installation_status,
+            download_ai_model,
+            open_setup_link,
             get_ollama_status,
             analyze_visual_asset,
             get_organization_approval,

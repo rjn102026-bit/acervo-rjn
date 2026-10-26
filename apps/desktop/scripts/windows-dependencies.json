@@ -1,0 +1,22 @@
+{
+  "release": "autobuild-2026-09-30-13-08",
+  "version": "n9.0.2-17-g2a571b6068",
+  "license": "LGPL-3.0-or-later",
+  "binary": {
+    "name": "ffmpeg-n9.0.2-17-g2a571b6068-win64-lgpl-shared-9.0.zip",
+    "url": "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-09-30-13-08/ffmpeg-n9.0.2-17-g2a571b6068-win64-lgpl-shared-9.0.zip",
+    "sha256": "7157177b8a6cb2174c1650ba8c71b363f2c78cba5330f88c4c02cf5b2b880646"
+  },
+  "sources": [
+    {
+      "name": "ffmpeg-2a571b6068.tar.gz",
+      "url": "https://codeload.github.com/FFmpeg/FFmpeg/tar.gz/2a571b606854520cf89804d8030c8b328e621689",
+      "sha256": "f02fc0809a13f37e3d4e1f74254d07e035a5ef01a6d91e727b915b1764d97540"
+    },
+    {
+      "name": "ffmpeg-builds-6c9aec5.tar.gz",
+      "url": "https://codeload.github.com/BtbN/FFmpeg-Builds/tar.gz/6c9aec5fc9a72ec3abedd1fa84db141fa18cf52b",
+      "sha256": "81da4f7c878dc0f60e6b8d0049a112e32178e20f025d468fe4e99e77b2dfe0ec"
+    }
+  ]
+}
